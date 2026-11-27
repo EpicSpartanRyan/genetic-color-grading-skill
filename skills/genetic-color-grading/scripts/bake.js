@@ -1,10 +1,9 @@
 // bake.js — final outputs of Genetic Color Grading, headless.
 // Winning genome in → dithered final image + baked 65^3 .cube out.
-// The .cube carries only the punctual steps (the 5 spatial steps —
-// Dehaze, Retinex, Clarity, Laplaciano local, Guided Detail — cannot be
-// baked into a LUT); if any spatial gene is active the export warns,
-// exactly as the web app's export toast does. The exported IMAGE does
-// include the spatial steps.
+// The skill pipeline is punctual-only (7 steps), so EVERYTHING bakes:
+// there are no spatial steps, no spatial warning, and the .cube carries
+// the full recipe. (The web app still has 5 spatial steps that cannot
+// bake; the skill removed them at build time — see build-engine.js.)
 //
 // Usage:
 //   node bake.js --image in.png --genome genome.json --out ./final [--name title]
@@ -15,7 +14,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const { parseArgs, loadImageAndEngine, renderGenome, cubeText, saveJSON, loadJSON, ensureDir, eng, encodePNG } = require('./session.js');
+const { parseArgs, loadImageAndEngine, renderGenome, cubeText, stripSpatialGenes, saveJSON, loadJSON, ensureDir, eng, encodePNG } = require('./session.js');
 
 function main() {
   const opts = parseArgs(process.argv.slice(2));
@@ -34,7 +33,7 @@ function main() {
 
   let genome, sourceDesc;
   if (opts.genome) {
-    genome = loadJSON(path.resolve(opts.genome));
+    genome = stripSpatialGenes(loadJSON(path.resolve(opts.genome)));
     sourceDesc = path.basename(opts.genome);
   } else {
     const gen = loadJSON(path.resolve(opts.genomes));
@@ -44,16 +43,12 @@ function main() {
       process.exit(1);
     }
     const cell = gen.cells[pick - 1];
-    genome = cell.genome;
+    genome = stripSpatialGenes(cell.genome);
     sourceDesc = path.basename(opts.genomes) + ' cell ' + pick + (cell.kind === 'original' ? ' (original)' : '');
   }
   const name = (opts.name || 'graded').replace(/[^A-Za-z0-9._-]+/g, '_');
 
-  // Spatial genes cannot bake into the .cube — warn, as the web app does.
-  const spatial = eng.spatialGenesActive(genome);
-  if (spatial.length) {
-    console.log('WARNING: spatial steps active (' + spatial.join(', ') + ') — they are IN the exported image but CANNOT be baked into the .cube. The .cube will only carry the punctual steps.');
-  }
+  // The skill has no spatial steps: the .cube carries the full recipe.
 
   // Final image at full resolution, with the chosen dither.
   const rendered = renderGenome(eng, genome, img.width, img.height);

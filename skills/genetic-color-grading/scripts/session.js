@@ -149,6 +149,63 @@ function renderContactSheet(eng, cells, opts) {
   return { png: encodePNG({ data: sheet, width: sheetW, height: sheetH }), cells: layout, width: sheetW, height: sheetH };
 }
 
+// Spatial steps removed (skill v2): the skill pipeline is punctual-only
+// (7 steps). The engine was built without Dehaze, Retinex, Clarity,
+// Laplaciano local and Guided Detail, so no genome the engine creates can
+// carry them — but genomes loaded from JSON files (e.g. a v1 gen file)
+// still might. Strip them so a loaded genome can never reintroduce a
+// spatial gene into the run or the bake recipe.
+const SPATIAL_KEYS = ['dehaze', 'retinex', 'clarity', 'loclap', 'guided'];
+function stripSpatialGenes(genome) {
+  if (!genome || !genome.values) return genome;
+  for (const k of SPATIAL_KEYS) delete genome.values[k];
+  if (Array.isArray(genome.order)) genome.order = genome.order.filter(k => SPATIAL_KEYS.indexOf(k) < 0);
+  return genome;
+}
+
+// Compose a contact sheet from plain decoded images (not genomes).
+// images: [{data: Uint8ClampedArray RGBA, width, height, label}].
+// Box-average downscale to cellW; numbered badges like renderContactSheet.
+// Returns {png: Buffer, cells: [{label, x, y, w, h}], width, height}.
+function composeImageSheet(images, opts) {
+  opts = opts || {};
+  const cols = opts.cols || 2;
+  const cellW = opts.cellW || 320;
+  const gap = opts.gap || 6;
+  const cellH = Math.max(8, Math.round(cellW * images[0].height / images[0].width));
+  const rows = Math.ceil(images.length / cols);
+  const sheetW = cols * cellW + (cols + 1) * gap;
+  const sheetH = rows * cellH + (rows + 1) * gap;
+  const sheet = new Uint8ClampedArray(sheetW * sheetH * 4);
+  for (let i = 0; i < sheet.length; i += 4) { sheet[i] = 24; sheet[i + 1] = 24; sheet[i + 2] = 28; sheet[i + 3] = 255; }
+  const layout = [];
+  images.forEach((im, i) => {
+    const cx = i % cols, cy = Math.floor(i / cols);
+    const x = gap + cx * (cellW + gap), y = gap + cy * (cellH + gap);
+    const sx = im.width / cellW, sy = im.height / cellH;
+    for (let yy = 0; yy < cellH; yy++) {
+      const y0 = Math.floor(yy * sy), y1 = Math.max(y0 + 1, Math.min(im.height, Math.ceil((yy + 1) * sy)));
+      for (let xx = 0; xx < cellW; xx++) {
+        const x0 = Math.floor(xx * sx), x1 = Math.max(x0 + 1, Math.min(im.width, Math.ceil((xx + 1) * sx)));
+        let r = 0, g = 0, b = 0, n = 0;
+        for (let py = y0; py < y1; py++) {
+          for (let px = x0; px < x1; px++) {
+            const o = (py * im.width + px) * 4;
+            r += im.data[o]; g += im.data[o + 1]; b += im.data[o + 2]; n++;
+          }
+        }
+        const di = ((y + yy) * sheetW + (x + xx)) * 4;
+        sheet[di] = Math.round(r / n); sheet[di + 1] = Math.round(g / n); sheet[di + 2] = Math.round(b / n); sheet[di + 3] = 255;
+      }
+    }
+    if (im.label !== undefined && im.label !== null && im.label !== '') {
+      drawBadge(sheet, sheetW, x + 6, y + 6, String(im.label), 2);
+    }
+    layout.push({ label: im.label, x, y, w: cellW, h: cellH });
+  });
+  return { png: encodePNG({ data: sheet, width: sheetW, height: sheetH }), cells: layout, width: sheetW, height: sheetH };
+}
+
 // .cube text for a genome — same format as the web app's bakedLutBlob().
 // title: shown in TITLE; the baked LUT is 65^3.
 function cubeText(eng, genome, title) {
@@ -197,4 +254,4 @@ function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
-module.exports = { parseArgs, resolveLutsDir, loadImageAndEngine, renderGenome, renderContactSheet, cubeText, saveJSON, loadJSON, ensureDir, eng, decodePNG, encodePNG };
+module.exports = { parseArgs, resolveLutsDir, loadImageAndEngine, renderGenome, renderContactSheet, composeImageSheet, stripSpatialGenes, SPATIAL_KEYS, cubeText, saveJSON, loadJSON, ensureDir, eng, decodePNG, encodePNG };
