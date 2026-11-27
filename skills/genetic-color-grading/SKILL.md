@@ -1,5 +1,6 @@
 ---
 name: genetic-color-grading
+license: MIT
 description: Evolutionary color grading of a photo — a genetic algorithm explores a 12-step grading pipeline and 73 curated 3D LUTs, the user picks the winners of each generation, and the run ends with a dithered final image plus a baked 65^3 .cube LUT for DaVinci Resolve. Use when the user asks to grade, enhance, or color-grade an image with this genetic method, to evolve a look over generations, or to bake a .cube from a graded image. Always use the scripts in this skill (scripts/rank-genes.js, evolve.js, bake.js) — never re-implement the pipeline by hand.
 ---
 
