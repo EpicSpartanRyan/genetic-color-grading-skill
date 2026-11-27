@@ -1,0 +1,4 @@
+# LUT data is installed at setup time, not committed (31 MB).
+skills/genetic-color-grading/luts/
+# Per-run outputs (local test runs).
+*.png

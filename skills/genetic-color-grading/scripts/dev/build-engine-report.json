@@ -1,0 +1,44 @@
+{
+  "engineBytes": 869287,
+  "statements": 588,
+  "includedStatements": 327,
+  "includedBytes": 606639,
+  "undefinedUsed": [
+    "buildGrid",
+    "e",
+    "i",
+    "renderPopulation",
+    "sMut",
+    "syncSelectionUI",
+    "toastEl",
+    "updateCompassUI",
+    "updateGridSizeUI",
+    "updateKillUI",
+    "updateMapLine",
+    "vMut"
+  ],
+  "excludedReferenced": [
+    "analyzePipeline",
+    "analyzePipelineDetailed",
+    "compassSave",
+    "monoBase96",
+    "renderPopulation"
+  ],
+  "stubFnNames": [
+    "buildGrid",
+    "renderPopulation",
+    "syncSelectionUI",
+    "updateCompassUI",
+    "updateGridSizeUI",
+    "updateKillUI",
+    "updateMapLine"
+  ],
+  "stubDataNames": [
+    "e",
+    "i",
+    "sMut",
+    "toastEl",
+    "vMut"
+  ],
+  "seedsNotFound": []
+}
