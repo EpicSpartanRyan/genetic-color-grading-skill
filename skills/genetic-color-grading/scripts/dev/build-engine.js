@@ -396,6 +396,85 @@ const NODE_PROVIDED = new Set([
 // ---------------------------------------------------------------------------
 const rawStmts = splitStatements(body);
 console.log('top-level statements:', rawStmts.length);
+
+// ---------------------------------------------------------------------------
+// 2b. Skill-only: strip the 5 spatial steps (Dehaze, Retinex, Clarity,
+// Laplaciano local, Guided Detail). The web app keeps them; the skill
+// pipeline is punctual-only (7 steps) so everything bakes into the .cube.
+// The transform runs on the raw statement texts BEFORE dependency
+// analysis, so the spatial apply functions lose their only referrer (the
+// applyOp switch) and drop out of the closure naturally — no dead code,
+// no stubs. Statements touched:
+//   - the FILTERS literal: the 5 entries, the header comment, and the
+//     step numbers of the surviving entries (1,2,5,7,10,11 -> 1..6)
+//   - FIXED_HEAD: the 5 keys (+ its comment)
+//   - softInitialGenome's fixedPool: the 5 keys
+//   - applyOp: the 5 switch cases
+//   - mutate's comment ("tras los pasos 1-11" -> "tras los pasos 1-6")
+// SPATIAL_GENE_LABELS / spatialGenesActive stay as seeds (they now always
+// report no spatial genes active); engine-node-section.js never referenced
+// spatial steps. Counts are verified — a missed pattern throws instead of
+// silently shipping a half-stripped engine.
+// ---------------------------------------------------------------------------
+const SPATIAL_KEYS = ['dehaze', 'retinex', 'clarity', 'loclap', 'guided'];
+const SPATIAL_ALT = SPATIAL_KEYS.join('|');
+function stripSpatialSteps(text) {
+  let out = text, n = 0;
+  const count = (re) => { const m = out.match(re); return m ? m.length : 0; };
+  if (out.indexOf('var FILTERS=[') >= 0) {
+    n = count(new RegExp('^\\s*\\{key:"(?:' + SPATIAL_ALT + ')",[^\\n]*\\},?\\n', 'gm'));
+    if (n !== 5) throw new Error('spatial strip: expected 5 FILTERS entries, found ' + n);
+    out = out.replace(new RegExp('^\\s*\\{key:"(?:' + SPATIAL_ALT + ')",[^\\n]*\\},?\\n', 'gm'), '');
+    const commentOld = '  /* Genes fijos: pasos 1-11 al inicio, antes de las LUTs (paso 12).\n' +
+      '     Exposición, balance de blancos, curvas, tone mapping, saturación y\n' +
+      '     hue son puntuales y se hornean en un único .cube; Dehaze, Retinex,\n' +
+      '     Clarity, Laplaciano local y Guided Detail son ESPACIALES (usan el\n' +
+      '     vecindario del píxel) y NO caben en un .cube: la imagen exportada\n' +
+      '     sí los lleva, la LUT horneada no (ver spatialGenesActive). */';
+    const commentNew = '  /* Genes fijos: pasos 1-6 al inicio, antes de las LUTs (paso 7).\n' +
+      '     Los 7 pasos son puntuales y se hornean en un único .cube.\n' +
+      '     (La skill no tiene pasos espaciales: Dehaze, Retinex, Clarity,\n' +
+      '     Laplaciano local y Guided Detail existen solo en la web app.) */';
+    if (out.indexOf(commentOld) < 0) throw new Error('spatial strip: FILTERS header comment not found verbatim');
+    out = out.replace(commentOld, commentNew);
+    // Renumber the surviving step labels (1,2,5,7,10,11 -> 1..6).
+    const renum = [
+      ['{key:"curves",  label:"Contraste y curvas", small:"Paso 5', '{key:"curves",  label:"Contraste y curvas", small:"Paso 3'],
+      ['{key:"tonemap", label:"Tone mapping",       small:"Paso 7', '{key:"tonemap", label:"Tone mapping",       small:"Paso 4'],
+      ['{key:"sat",     label:"Saturación",         small:"Paso 10', '{key:"sat",     label:"Saturación",         small:"Paso 5'],
+      ['{key:"huesel",  label:"Hue / Color selectivo", small:"Paso 11', '{key:"huesel",  label:"Hue / Color selectivo", small:"Paso 6'],
+    ];
+    for (const [a, b] of renum) {
+      if (out.indexOf(a) < 0) throw new Error('spatial strip: renumber pattern not found: ' + a.slice(0, 40));
+      out = out.replace(a, b);
+    }
+  }
+  if (out.indexOf('var FIXED_HEAD=') >= 0) {
+    n = count(new RegExp('"(?:' + SPATIAL_ALT + ')",', 'g'));
+    if (n !== 5) throw new Error('spatial strip: expected 5 FIXED_HEAD keys, found ' + n);
+    out = out.replace(new RegExp('"(?:' + SPATIAL_ALT + ')",', 'g'), '');
+    out = out.replace('/* Genes fijos: pasos 1-11 siempre al inicio, en orden. */',
+      '/* Genes fijos: pasos 1-6 siempre al inicio, en orden. */');
+  }
+  if (out.indexOf('function softInitialGenome') >= 0) {
+    n = count(new RegExp('"(?:' + SPATIAL_ALT + ')",', 'g'));
+    if (n !== 5) throw new Error('spatial strip: expected 5 fixedPool keys, found ' + n);
+    out = out.replace(new RegExp('"(?:' + SPATIAL_ALT + ')",', 'g'), '');
+  }
+  if (out.indexOf('function applyOp(') >= 0) {
+    n = count(new RegExp('^\\s*case "(?:' + SPATIAL_ALT + ')"[^\\n]*\\n', 'gm'));
+    if (n !== 5) throw new Error('spatial strip: expected 5 applyOp cases, found ' + n);
+    out = out.replace(new RegExp('^\\s*case "(?:' + SPATIAL_ALT + ')"[^\\n]*\\n', 'gm'), '');
+  }
+  if (out.indexOf('function mutate(') >= 0) {
+    out = out.replace('/* Solo se baraja la zona de LUTs, tras los pasos 1-11. */',
+      '/* Solo se baraja la zona de LUTs, tras los pasos 1-6. */');
+  }
+  return out;
+}
+for (let i = 0; i < rawStmts.length; i++) rawStmts[i] = stripSpatialSteps(rawStmts[i]);
+console.log('spatial steps stripped (skill-only): dehaze, retinex, clarity, loclap, guided');
+
 const stmts = rawStmts.map(analyzeStatement);
 
 const definedInSource = new Set();
@@ -501,6 +580,10 @@ const header = `// engine.js — GENERATED FILE. Do not edit by hand.
 // (dependency closure over the pure, non-DOM, non-GPU functions).
 // Browser-only functions (canvas, WebGL, IndexedDB, DOM) were excluded;
 // their Node twins live in the NODE section at the end of this file.
+// SKILL-ONLY DIFFERENCE: the 5 spatial steps (Dehaze, Retinex, Clarity,
+// Laplaciano local, Guided Detail) were stripped at build time — the skill
+// pipeline is punctual-only (7 steps) so everything bakes into the .cube.
+// The web app itself is untouched.
 // To regenerate after a change in the web app, re-run build-engine.js
 // from the skill staging directory and re-run the smoke tests.
 'use strict';

@@ -5,6 +5,10 @@
 // (dependency closure over the pure, non-DOM, non-GPU functions).
 // Browser-only functions (canvas, WebGL, IndexedDB, DOM) were excluded;
 // their Node twins live in the NODE section at the end of this file.
+// SKILL-ONLY DIFFERENCE: the 5 spatial steps (Dehaze, Retinex, Clarity,
+// Laplaciano local, Guided Detail) were stripped at build time — the skill
+// pipeline is punctual-only (7 steps) so everything bakes into the .cube.
+// The web app itself is untouched.
 // To regenerate after a change in the web app, re-run build-engine.js
 // from the skill staging directory and re-run the smoke tests.
 'use strict';
@@ -469,46 +473,6 @@ function lumArray(d){
   return lum;
 }
 
-function applyDehaze(d,w,h,a){
-  if(a===0||!w||!h) return;
-  var n=w*h;
-  var R=new Float32Array(n), G=new Float32Array(n), B=new Float32Array(n);
-  for(var i=0,j=0;j<n;i+=4,j++){ R[j]=d[i]/255; G[j]=d[i+1]/255; B[j]=d[i+2]/255; }
-  var rad=Math.max(8,Math.min(80,Math.round(Math.min(w,h)*0.06)));
-  var Rb=blur2(R,w,h,rad), Gb=blur2(G,w,h,rad), Bb=blur2(B,w,h,rad);
-  var mR=0,mG=0,mB=0;
-  for(var q=0;q<n;q++){ mR+=R[q]; mG+=G[q]; mB+=B[q]; }
-  mR/=n; mG/=n; mB/=n;
-  var k=a*0.85, satF= a>0 ? 1+a*0.30 : 1+a*0.25, veil=-a;
-  for(var p=0,idx=0;p<n;p++,idx+=4){
-    var r=R[p] + k*(Rb[p]-mR), g=G[p] + k*(Gb[p]-mG), b=B[p] + k*(Bb[p]-mB);
-    var lum=0.299*r + 0.587*g + 0.114*b;
-    r=lum+(r-lum)*satF; g=lum+(g-lum)*satF; b=lum+(b-lum)*satF;
-    if(veil>0){ var vv=veil*0.16; r=r*(1-veil*0.22)+vv; g=g*(1-veil*0.22)+vv; b=b*(1-veil*0.22)+vv; }
-    d[idx]=clamp255(r*255); d[idx+1]=clamp255(g*255); d[idx+2]=clamp255(b*255);
-  }
-}
-
-function applyClarity(d,w,h,a){
-  if(a===0||!w||!h) return;
-  var lum=lumArray(d);
-  var rad=Math.max(4,Math.min(40,Math.round(Math.min(w,h)*0.025)));
-  var lb=blur2(lum,w,h,rad);
-  for(var p=0,idx=0;p<lum.length;p++,idx+=4){
-    var L=lum[p];
-    var mid=4*L*(1-L); if(mid<0)mid=0; if(mid>1)mid=1;
-    var target=L + a*(L-lb[p])*mid*1.8;
-    if(target<0)target=0; if(target>1)target=1;
-    if(L>0.004){
-      var sc=target/L;
-      d[idx]=clamp255(d[idx]*sc); d[idx+1]=clamp255(d[idx+1]*sc); d[idx+2]=clamp255(d[idx+2]*sc);
-    }else{
-      var add=(target-L)*255;
-      d[idx]=clamp255(d[idx]+add); d[idx+1]=clamp255(d[idx+1]+add); d[idx+2]=clamp255(d[idx+2]+add);
-    }
-  }
-}
-
 
 /* ---------- Nuevos filtros (corrección, cine, perceptuales, HDR) ---------- */
 function hslToRgb255(h,s,l){
@@ -886,64 +850,10 @@ function sCurve01(x, k){
 
 function lum709(r,g,b){ return 0.2126*r + 0.7152*g + 0.0722*b; }
 
-function blurChannels(ch,w,h,r){
-  return [blur2(ch[0],w,h,r), blur2(ch[1],w,h,r), blur2(ch[2],w,h,r)];
-}
-
 function blendFull(d, idx, fr, fg, fb, amt){
   d[idx]  = clamp255(d[idx]  *(1-amt) + fr*255*amt);
   d[idx+1]= clamp255(d[idx+1]*(1-amt) + fg*255*amt);
   d[idx+2]= clamp255(d[idx+2]*(1-amt) + fb*255*amt);
-}
-
-/* 01 · Retinex MSRCR — multi-escala logarítmico + restauración de color */
-function applyRetinex(d,w,h,amt){
-  if(amt===0||!w||!h) return;
-  var n=w*h, ch=channelArrays(d,w,h), md=Math.min(w,h);
-  var radii=[Math.max(2,Math.round(md*0.02)), Math.max(3,Math.round(md*0.10)), Math.max(4,Math.min(60,Math.round(md*0.30)))];
-  var blurs=[blurChannels(ch,w,h,radii[0]), blurChannels(ch,w,h,radii[1]), blurChannels(ch,w,h,radii[2])];
-  var ret=[new Float32Array(n), new Float32Array(n), new Float32Array(n)];
-  var mn=Infinity, mx=-Infinity;
-  for(var c=0;c<3;c++){
-    for(var p=0;p<n;p++){
-      var v=(Math.log1p(ch[c][p]*10)-Math.log1p(blurs[0][c][p]*10)
-           + Math.log1p(ch[c][p]*10)-Math.log1p(blurs[1][c][p]*10)
-           + Math.log1p(ch[c][p]*10)-Math.log1p(blurs[2][c][p]*10))/3;
-      ret[c][p]=v;
-      if(v<mn)mn=v; if(v>mx)mx=v;
-    }
-  }
-  var range=(mx-mn)||1;
-  for(var q=0,idx=0;q<n;q++,idx+=4){
-    blendFull(d, idx,
-      0.5*c01((ret[0][q]-mn)/range)+0.5*ch[0][q],
-      0.5*c01((ret[1][q]-mn)/range)+0.5*ch[1][q],
-      0.5*c01((ret[2][q]-mn)/range)+0.5*ch[2][q], amt);
-  }
-}
-
-/* 03 · Local Laplacian — detalle local amplificado (Paris et al.) */
-function applyLocalLaplacian(d,w,h,amt){
-  if(amt===0||!w||!h) return;
-  var ch=channelArrays(d,w,h), bl=blurChannels(ch,w,h,3);
-  for(var p=0,idx=0;p<w*h;p++,idx+=4){
-    blendFull(d, idx,
-      c01(bl[0][p]+(ch[0][p]-bl[0][p])*2.2),
-      c01(bl[1][p]+(ch[1][p]-bl[1][p])*2.2),
-      c01(bl[2][p]+(ch[2][p]-bl[2][p])*2.2), amt);
-  }
-}
-
-/* 04 · Guided Detail — detalle del guided filter (He et al.) */
-function applyGuidedDetail(d,w,h,amt){
-  if(amt===0||!w||!h) return;
-  var ch=channelArrays(d,w,h), bl=blurChannels(ch,w,h,2);
-  for(var p=0,idx=0;p<w*h;p++,idx+=4){
-    blendFull(d, idx,
-      c01(ch[0][p]+(ch[0][p]-bl[0][p])*1.2),
-      c01(ch[1][p]+(ch[1][p]-bl[1][p])*1.2),
-      c01(ch[2][p]+(ch[2][p]-bl[2][p])*1.2), amt);
-  }
 }
 
 /* 09 · Auto Levels — estiramiento 1–99% por canal */
@@ -1608,23 +1518,16 @@ function applyLut3D(d, amount, lutId){
    Genoma = { values: {lut: intensidad}, order: [LUTs en orden] }
    ================================================================== */
 var FILTERS=[
-  /* Genes fijos: pasos 1-11 al inicio, antes de las LUTs (paso 12).
-     Exposición, balance de blancos, curvas, tone mapping, saturación y
-     hue son puntuales y se hornean en un único .cube; Dehaze, Retinex,
-     Clarity, Laplaciano local y Guided Detail son ESPACIALES (usan el
-     vecindario del píxel) y NO caben en un .cube: la imagen exportada
-     sí los lleva, la LUT horneada no (ver spatialGenesActive). */
+  /* Genes fijos: pasos 1-6 al inicio, antes de las LUTs (paso 7).
+     Los 7 pasos son puntuales y se hornean en un único .cube.
+     (La skill no tiene pasos espaciales: Dehaze, Retinex, Clarity,
+     Laplaciano local y Guided Detail existen solo en la web app.) */
   {key:"exp",     label:"Exposición",        small:"Paso 1 · EV · siempre presente",            min:-2,   max:2,     def:0,    fixed:1},
   {key:"wbk",     label:"Balance de blancos", small:"Paso 2 · Kelvin · siempre presente",        min:2500, max:10000, def:6500, fixed:1},
-  {key:"dehaze",  label:"Dehaze",            small:"Paso 3 · velo atmosférico · siempre presente", min:0, max:1, def:0, fixed:1},
-  {key:"retinex", label:"Retinex",           small:"Paso 4 · iluminación / reflectancia · siempre presente", min:0, max:1, def:0, fixed:1},
-  {key:"curves",  label:"Contraste y curvas", small:"Paso 5 · lift / gamma / gain + curva S · siempre presente", min:-1, max:1, def:0, fixed:1, label1:"Curva S", key2:"curvesLift", label2:"Lift", min2:-0.3, max2:0.3, def2:0, key3:"curvesGamma", label3:"Gamma", min3:0.5, max3:2, def3:1, key4:"curvesGain", label4:"Gain", min4:0.5, max4:1.6, def4:1, key5:"curvesShad", label5:"Sombras", min5:-1, max5:1, def5:0, key6:"curvesHigh", label6:"Luces", min6:-1, max6:1, def6:0},
-  {key:"clarity", label:"Clarity",           small:"Paso 6 · contraste local de medios tonos · siempre presente", min:0, max:1, def:0, fixed:1},
-  {key:"tonemap", label:"Tone mapping",       small:"Paso 7 · curva + intensidad · siempre presente", min:0, max:5, def:0, fixed:1, label1:"Curva / operador", key2:"tonemapAmt", label2:"Intensidad", min2:0, max2:1, def2:1},
-  {key:"loclap",  label:"Laplaciano local",  small:"Paso 8 · detalle local multi-escala · siempre presente", min:0, max:1, def:0, fixed:1},
-  {key:"guided",  label:"Guided Detail",     small:"Paso 9 · detalle por filtro guiado · siempre presente", min:0, max:1, def:0, fixed:1},
-  {key:"sat",     label:"Saturación",         small:"Paso 10 · modelo + intensidad · siempre presente", min:0, max:2, def:0, fixed:1, label1:"Modelo", key2:"satAmt", label2:"Intensidad", min2:0, max2:2, def2:1},
-  {key:"huesel",  label:"Hue / Color selectivo", small:"Paso 11 · hue objetivo + desplazamiento · siempre presente", min:0, max:360, def:0, fixed:1, label1:"Hue objetivo", key2:"hueselShift", label2:"Desplazamiento", min2:-180, max2:180, def2:0},
+  {key:"curves",  label:"Contraste y curvas", small:"Paso 3 · lift / gamma / gain + curva S · siempre presente", min:-1, max:1, def:0, fixed:1, label1:"Curva S", key2:"curvesLift", label2:"Lift", min2:-0.3, max2:0.3, def2:0, key3:"curvesGamma", label3:"Gamma", min3:0.5, max3:2, def3:1, key4:"curvesGain", label4:"Gain", min4:0.5, max4:1.6, def4:1, key5:"curvesShad", label5:"Sombras", min5:-1, max5:1, def5:0, key6:"curvesHigh", label6:"Luces", min6:-1, max6:1, def6:0},
+  {key:"tonemap", label:"Tone mapping",       small:"Paso 4 · curva + intensidad · siempre presente", min:0, max:5, def:0, fixed:1, label1:"Curva / operador", key2:"tonemapAmt", label2:"Intensidad", min2:0, max2:1, def2:1},
+  {key:"sat",     label:"Saturación",         small:"Paso 5 · modelo + intensidad · siempre presente", min:0, max:2, def:0, fixed:1, label1:"Modelo", key2:"satAmt", label2:"Intensidad", min2:0, max2:2, def2:1},
+  {key:"huesel",  label:"Hue / Color selectivo", small:"Paso 6 · hue objetivo + desplazamiento · siempre presente", min:0, max:360, def:0, fixed:1, label1:"Hue objetivo", key2:"hueselShift", label2:"Desplazamiento", min2:-180, max2:180, def2:0},
 ];
 
 /* Las 73 LUTs del Top 75 se registran como filtros independientes (gen 0-1 cada una), en orden de ranking */
@@ -1637,8 +1540,8 @@ var FBY={};
 
 var CANON=FILTERS.map(function(f){ return f.key; });
 
-/* Genes fijos: pasos 1-11 siempre al inicio, en orden. */
-var FIXED_HEAD=["exp","wbk","dehaze","retinex","curves","clarity","tonemap","loclap","guided","sat","huesel"];
+/* Genes fijos: pasos 1-6 siempre al inicio, en orden. */
+var FIXED_HEAD=["exp","wbk","curves","tonemap","sat","huesel"];
 
 var FIXED_KEYS=FIXED_HEAD.slice();
 
@@ -1687,8 +1590,6 @@ function applyOp(imgData, key, v){
     case "hsluv": applyHsluv(d,v); break;
     case "ipt": applyIpt(d,v); break;
     case "agx": applyAgx(d,v); break;
-    case "dehaze": applyDehaze(d,w,h,v); break;
-    case "clarity": applyClarity(d,w,h,v); break;
     case "exp": applyExposure(d,v); break;
     case "wbk": applyWBTemp(d,v); break;
     case "curves": applyCurves(d, v); break;
@@ -1725,9 +1626,6 @@ function applyOp(imgData, key, v){
     case "hdrpq": applyHdrPq(d,v); break;
     case "dither": applyDither(d,w,h,v); break;
     case "seldesat": applySelDesat(d,v[0],v[1]); break;
-    case "retinex": applyRetinex(d,w,h,v); break;
-    case "loclap": applyLocalLaplacian(d,w,h,v); break;
-    case "guided": applyGuidedDetail(d,w,h,v); break;
     case "autolevels": applyAutoLevels(d,v); break;
     case "scurve": applySCurveRGB(d,v); break;
     case "kodak2383": applyKodak2383(d,v); break;
@@ -1910,7 +1808,7 @@ function softInitialGenome(base, idx){
   /* Rutas: que cada variante toque al menos 1-2 pasos fijos del
      pipeline (Hue queda fuera: nace fijado en 0, 0 por pin global). */
   var forcedN= tier===1?1 : 2, forcedCount=0;
-  var fixedPool=shuffled(["exp","wbk","dehaze","retinex","curves","clarity","tonemap","loclap","guided","sat"]);
+  var fixedPool=shuffled(["exp","wbk","curves","tonemap","sat"]);
   for(var fi=0; fi<fixedPool.length && forcedCount<forcedN; fi++){
     var fk=fixedPool[fi], ff=FBY[fk];
     if(!ff) continue;
@@ -1977,7 +1875,7 @@ function mutate(g, rate){
   if(Math.random()<rate*1.6){
     var swaps=1+((Math.random()*2)|0);
     for(var s=0;s<swaps;s++){
-      /* Solo se baraja la zona de LUTs, tras los pasos 1-11. */
+      /* Solo se baraja la zona de LUTs, tras los pasos 1-6. */
       var hb=FIXED_HEAD.length, span=g.order.length-hb;
       if(span<2) break;
       var i=hb+((Math.random()*span)|0), j=hb+((Math.random()*span)|0);

@@ -3,58 +3,60 @@
 // genes; later generations breed the picked winners (elitism + guided
 // children + immigrants), exactly as the web app's Evolucionar handler.
 //
+// GRID (v2): every generation is exactly 6 variant cells (3 cols x 2
+// rows). There is NO original/centre cell — the user only ever sees and
+// picks variants. Picks are cell numbers 1–6.
+//
+// The engine still thinks in square grids (GRID_SIZE 3, POP_SIZE 8,
+// centre cell = original) — that geometry is used ONLY as a retry-budget
+// threshold inside makeSafeChild / makeGuidedChild / makeSafeImmigrant.
+// This script never calls genomeAtCell() / getCenterCell(): cells map
+// 1:1 onto the local 6-genome population, and compass learning runs over
+// those 6 cells via compassLearn6() below (a verbatim twin of the
+// engine's compassLearn, same math, same constants — the engine's
+// version iterates its own 9-cell grid and cannot see this grid).
+//
 // State lives in <out>/state.json (compass weights, map risk, pins,
 // mutation/decay, allowed genes, ancestor); each generation writes
 // <out>/gen<N>.json (genomes) and <out>/gen<N>.png (numbered contact
-// sheet). The user picks winners by CELL NUMBER (1-based, row-major);
-// the centre cell is the original (labelled ORIG) and may be picked —
-// it breeds the identity genome.
+// sheet). The user picks winners by CELL NUMBER (1-based, row-major).
 //
 // Usage:
 //   Gen 0:  node evolve.js --image in.png --out ./run1 --gen 0 \
-//             --genes ./run1/genes.json --pick 1,5,9 [--safe] [--tree]
+//             --genes ./run1/genes.json --pick 1,3,5 [--safe] [--tree]
 //   Gen N:  node evolve.js --image in.png --out ./run1 --gen N \
-//             --picks 2,5 [--punish 7] [--safe] [--tree]
-//   --pick/--picks are 1-based cell numbers. --punish "casts a look"
-//   (compass punishment) and excludes that genome from the parents.
-//   --safe/--tree default to the values stored in state.json (Gen 0:
-//   safe on, tree on). --mutation/--decay override the rates.
+//             --picks 2,5 [--punish 4] [--safe] [--tree]
+//   --pick/--picks are 1-based cell numbers (1..6). --punish "casts a
+//   look" (compass punishment) and excludes that genome from the
+//   parents. --safe/--tree default to the values stored in state.json
+//   (Gen 0: safe on, tree on). --mutation/--decay override the rates.
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const { parseArgs, loadImageAndEngine, renderContactSheet, saveJSON, loadJSON, ensureDir, eng } = require('./session.js');
+const { parseArgs, loadImageAndEngine, renderContactSheet, stripSpatialGenes, saveJSON, loadJSON, ensureDir, eng } = require('./session.js');
 
-function gridCells(population, gridSize) {
-  // Row-major cells; centre cell is the original (identity genome).
-  const total = gridSize * gridSize;
-  const center = Math.floor(total / 2);
-  const cells = [];
-  let pi = 0;
-  for (let c = 0; c < total; c++) {
-    if (c === center) {
-      cells.push({ cell: c, pick: c + 1, kind: 'original', genome: eng.identityGenome(), lineage: 'Original' });
-    } else {
-      const g = population[pi++];
-      cells.push({ cell: c, pick: c + 1, kind: 'variant', genome: g, lineage: g.lineage || '' });
-    }
-  }
-  return cells;
+// Grid: 3 columns x 2 rows = 6 variant cells, no original.
+const GRID_COLS = 3;
+const POP = GRID_COLS * 2;
+
+function gridCells(population) {
+  // Row-major cells; every cell is a variant, 1:1 with the population.
+  return population.map((g, i) => ({ cell: i, pick: i + 1, kind: 'variant', genome: g, lineage: g.lineage || '' }));
 }
 
-function writeGeneration(outDir, generation, gridSize, cells, state) {
+function writeGeneration(outDir, generation, cells, state) {
   const genFile = path.join(outDir, 'gen' + generation + '.json');
   saveJSON(genFile, {
     tool: 'genetic-color-grading/evolve',
-    version: 1,
+    version: 2,
     generation,
-    gridSize,
+    cols: GRID_COLS,
+    rows: POP / GRID_COLS,
+    cellCount: cells.length,
     cells: cells.map(c => ({ cell: c.cell, pick: c.pick, kind: c.kind, lineage: c.lineage, genome: c.genome })),
   });
-  const sheetCells = cells.map(c => ({
-    genome: c.genome,
-    label: c.kind === 'original' ? 'ORIG' : String(c.pick),
-  }));
-  const sheet = renderContactSheet(eng, sheetCells, { cols: gridSize, cellW: 320 });
+  const sheetCells = cells.map(c => ({ genome: c.genome, label: String(c.pick) }));
+  const sheet = renderContactSheet(eng, sheetCells, { cols: GRID_COLS, cellW: 320 });
   const pngFile = path.join(outDir, 'gen' + generation + '.png');
   fs.writeFileSync(pngFile, sheet.png);
   saveJSON(path.join(outDir, 'state.json'), state);
@@ -63,14 +65,14 @@ function writeGeneration(outDir, generation, gridSize, cells, state) {
   return { genFile, pngFile };
 }
 
-function captureState(generation, gridSize, ancestor, allowedSet) {
+function captureState(generation, ancestor, allowedSet) {
   const compass = eng.getCompass();
   const mapRisk = eng.getMapRisk();
   return {
     tool: 'genetic-color-grading/state',
-    version: 1,
+    version: 2,
     generation,
-    gridSize,
+    gridCols: GRID_COLS,
     ancestor,
     allowedSet,
     compass: {
@@ -125,25 +127,124 @@ function parseCellList(s) {
   return String(s).split(',').map(x => parseInt(x.trim(), 10)).filter(n => isFinite(n) && n >= 1);
 }
 
+// Matrix x vector (copy of the engine's matVecMul — it is not exported).
+function matVecMul(M, v) {
+  var o = new Array(v.length);
+  for (var i = 0; i < v.length; i++) {
+    var s = 0, Mi = M[i];
+    for (var j = 0; j < v.length; j++) s += Mi[j] * v[j];
+    o[i] = s;
+  }
+  return o;
+}
+
+// Compass learning over THIS grid: verbatim twin of the engine's
+// compassLearn() (same Bradley-Terry math, same constants), except the
+// cell loop runs over the 6 local genomes instead of the engine's 9-cell
+// square grid with a centre original. The engine's version cannot be
+// used here: it iterates genomeAtCell() over GRID_SIZE*GRID_SIZE cells
+// and always counts the identity genome as an unpicked "rest" feature.
+//
+// Constants are the engine's (engine.js: COMPASS_LR=0.3, COMPASS_DECAY=
+// 0.85, BT_TEMP=sqrt(active rewards)). compassSave()/updateCompassUI()
+// are no-ops in Node and are skipped. `selected` maps 0-based cell
+// index -> true for the picked winners.
+function compassLearn6(population, selected) {
+  const compass = eng.getCompass();
+  if (!compass.on) return; // genePhase is forced false in this script.
+  const chosenF = [], restF = [];
+  for (let ci = 0; ci < population.length; ci++) {
+    const g = population[ci];
+    if (!g) continue;
+    if (eng.isPunishedGenome(g)) continue; // already punished instantly: do not count twice
+    const f = eng.rewardFeaturesFor(g);
+    if (!f) continue;
+    if (selected[ci]) chosenF.push(f); else restF.push(f);
+  }
+  if (!chosenF.length || !restF.length) return;
+  const all = chosenF.concat(restF);
+  // Mean and deviation of each reward within this generation.
+  const means = {}, sds = {};
+  eng.REWARD_FEATURES.forEach(function (rf) {
+    let m = 0, i;
+    for (i = 0; i < all.length; i++) m += all[i][rf.id];
+    m /= all.length;
+    let v = 0;
+    for (i = 0; i < all.length; i++) { const d = all[i][rf.id] - m; v += d * d; }
+    means[rf.id] = m; sds[rf.id] = Math.sqrt(v / all.length);
+  });
+  // Only active indices learn: z rows, whitening and gradient live in
+  // their subspace; an ignored index's weight neither moves nor decays.
+  const actIdx = eng.compassActiveIdx();
+  if (!actIdx.length) return;
+  const BT_TEMP = Math.sqrt(actIdx.length); // tempered BT score: same direction, later sigmoid saturation; the gradient is NOT divided
+  function zRow(f) {
+    return actIdx.map(function (fi) {
+      const rf = eng.REWARD_FEATURES[fi], sd = sds[rf.id];
+      return sd > 1e-9 ? (f[rf.id] - means[rf.id]) / sd : 0;
+    });
+  }
+  const zC = chosenF.map(zRow), zR = restF.map(zRow);
+  // Whitening: differences and weights to the decorrelated space. The
+  // score of each pair is identical in both spaces (w'·dz' = w·dz); what
+  // changes is the direction of the gradient.
+  const wh = eng.compassWhiten(zC.concat(zR));
+  const wArr = actIdx.map(function (fi) { return compass.w[eng.REWARD_FEATURES[fi].id] || 0; });
+  let zwC = zC, zwR = zR, wW = wArr;
+  if (wh) {
+    zwC = zC.map(function (z) { return matVecMul(wh.W, z); });
+    zwR = zR.map(function (z) { return matVecMul(wh.W, z); });
+    wW = matVecMul(wh.Wi, wArr);
+  }
+  function scoreW(zw) {
+    let s = 0;
+    for (let fi = 0; fi < zw.length; fi++) s += wW[fi] * zw[fi];
+    return s / BT_TEMP; // tempered score
+  }
+  const scC = zwC.map(scoreW), scR = zwR.map(scoreW);
+  const grad = actIdx.map(function () { return 0; });
+  for (let a = 0; a < zwC.length; a++) {
+    for (let b = 0; b < zwR.length; b++) {
+      const diff = scC[a] - scR[b];
+      if (diff > 30) continue; // pair already predicted with certainty: contributes nothing
+      const omP = 1 / (1 + Math.exp(diff)); // 1 − σ(diff), bounded by the if
+      for (let fi2 = 0; fi2 < grad.length; fi2++) {
+        const dz = zwC[a][fi2] - zwR[b][fi2];
+        if (dz) grad[fi2] += omP * dz;
+      }
+    }
+  }
+  const npairs = chosenF.length * restF.length;
+  let dW = grad.map(function (gv) { return 0.3 * gv / npairs; }); // COMPASS_LR = 0.3
+  if (wh) dW = matVecMul(wh.W, dW); // the step, back to weight space
+  actIdx.forEach(function (fi, k) {
+    const rf = eng.REWARD_FEATURES[fi];
+    const wOld = (compass.w[rf.id] || 0) * 0.85; // COMPASS_DECAY = 0.85
+    compass.w[rf.id] = eng.clampCompassW(wOld + dW[k]);
+  });
+  compass.picks++; compass.chosen += chosenF.length;
+  // (compassSave() / updateCompassUI() are no-ops in Node.)
+}
+
 function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help || !opts.image || !opts.out || opts.gen === undefined) {
-    console.log('Usage: node evolve.js --image in.png --out ./run1 --gen 0 --genes genes.json --pick 1,5,9');
-    console.log('       node evolve.js --image in.png --out ./run1 --gen N --picks 2,5 [--punish 7]');
+    console.log('Usage: node evolve.js --image in.png --out ./run1 --gen 0 --genes genes.json --pick 1,3,5');
+    console.log('       node evolve.js --image in.png --out ./run1 --gen N --picks 2,5 [--punish 4]');
     process.exit(opts.help ? 0 : 1);
   }
   const t0 = Date.now();
   const outDir = path.resolve(opts.out);
   ensureDir(outDir);
   const gen = parseInt(opts.gen, 10);
-  const { img } = loadImageAndEngine({ image: opts.image, luts: opts.luts, grid: opts.grid });
+  const { img } = loadImageAndEngine({ image: opts.image, luts: opts.luts });
   eng.__setGenePhase(false);
-  const gridSize = eng.getGridSize();
 
   if (gen === 0) {
     // ---- Gen 0 (mirror newPopulationFromAncestor) ----
+    // 6 cells: 1 ancestor clone + 5 soft-initial genomes.
     if (!opts.genes || !opts.pick) {
-      console.error('Gen 0 needs --genes <genes.json from rank-genes> and --pick <rank numbers, e.g. 1,5,9>');
+      console.error('Gen 0 needs --genes <genes.json from rank-genes> and --pick <rank numbers, e.g. 1,3,5>');
       process.exit(1);
     }
     const ranked = loadJSON(path.resolve(opts.genes));
@@ -174,7 +275,7 @@ function main() {
     if (safeOn && eng.warnKeyCount(eng.analyzePipeline(first)) > 0) first = eng.repairToSafe(first);
     eng.applyGenePins(first);
     const population = [first];
-    for (let i = 1; i < eng.getPopSize(); i++) {
+    for (let i = 1; i < POP; i++) {
       population.push(eng.applyGenePins(safeOn ? eng.makeSafeInitialGenome(anc, i) : eng.softInitialGenome(anc, i)));
     }
     const shuffledPop = eng.shuffled(population);
@@ -183,9 +284,9 @@ function main() {
     eng.setSelected({});
     // 65^3 grids for the chosen LUTs, on demand (web: ensureLuts65 on confirm).
     chosenIdx.forEach(idx => eng.__ensureLut65Sync(idx));
-    const cells = gridCells(shuffledPop, gridSize);
-    const state = captureState(0, gridSize, anc, allowedSet);
-    writeGeneration(outDir, 0, gridSize, cells, state);
+    const cells = gridCells(shuffledPop);
+    const state = captureState(0, anc, allowedSet);
+    writeGeneration(outDir, 0, cells, state);
     console.log('Gen 0: ' + chosenIdx.length + ' genes chosen (' + chosenIdx.map(i => eng.lutName(i)).join(', ') + ')');
     console.log('safe limits: ' + (safeOn ? 'on' : 'off') + ', tree: ' + (eng.__isTreeOn() ? 'on' : 'off') +
       ', mutation: ' + eng.getMutationPct() + '%, decay: ' + eng.getDecayPct() + '%/gen');
@@ -212,29 +313,34 @@ function main() {
   if (opts.mutation !== undefined) eng.setMutationPct(parseInt(opts.mutation, 10));
   if (opts.decay !== undefined) eng.setDecayPct(parseInt(opts.decay, 10));
 
-  // Restore the population (variants only; centre cell is the original).
-  const center = eng.getCenterCell();
+  // Restore the population: all cells are variants (v1 files had a
+  // centre original cell — it is dropped here, and any spatial genes a
+  // v1 genome carried are stripped).
   const population = [];
-  prevGen.cells.forEach(c => { if (c.kind === 'variant') population.push(c.genome); });
+  prevGen.cells.forEach(c => { if (c.kind === 'variant') population.push(stripSpatialGenes(c.genome)); });
+  if (population.length !== POP) {
+    console.error('gen' + (gen - 1) + '.json has ' + population.length + ' variant cells, expected ' + POP + ' — regenerate it with this version of evolve.js');
+    process.exit(1);
+  }
   eng.setPopulation(population);
   eng.setGeneration(gen - 1);
 
   const picks = parseCellList(opts.picks);
   const punish = parseCellList(opts.punish);
   if (!picks.length) {
-    console.error('Gen ' + gen + ' needs --picks <cell numbers, e.g. 2,5>');
+    console.error('Gen ' + gen + ' needs --picks <cell numbers 1..' + POP + ', e.g. 2,5>');
     process.exit(1);
   }
   const selected = {};
-  picks.forEach(p => { selected[p - 1] = true; });
+  picks.forEach(p => { if (p >= 1 && p <= POP) selected[p - 1] = true; });
   eng.setSelected(selected);
 
   // Punishments first: move the compass away from those looks and
   // exclude them from the parents (web: punished picks are not parents).
   const punishedCells = new Set();
   for (const p of punish) {
-    if (p - 1 === eng.getCenterCell()) { console.log('punish: cell ' + p + ' is the original, cannot punish it'); continue; }
-    const g = eng.genomeAtCell(p - 1);
+    if (p < 1 || p > POP) { console.log('punish: cell ' + p + ' out of range 1..' + POP + ', skipped'); continue; }
+    const g = population[p - 1];
     if (!g) { console.log('punish: cell ' + p + ' has no genome, skipped'); continue; }
     const res = eng.__punishLook(g, population);
     if (res) {
@@ -248,7 +354,7 @@ function main() {
   Object.keys(selected).forEach(k => {
     const ci = parseInt(k, 10);
     if (punishedCells.has(ci)) return;
-    const g = eng.genomeAtCell(ci);
+    const g = population[ci];
     if (g) survivors.push(g);
   });
   if (!survivors.length) {
@@ -259,14 +365,14 @@ function main() {
   const rate = eng.mutRate();
   eng.applyDecayOnce(gen);
   eng.resetKillGen();
-  eng.compassLearn();
+  compassLearn6(population, selected);
   eng.__clearTreeSeen();
   eng.__clearPunished();
   const next = [];
   survivors.forEach(g => { next.push(eng.cloneGenome(g, 'sobreviviente', 'Elegido')); });
   let immigrants = 2;
-  let childCount = eng.getPopSize() - next.length - immigrants;
-  if (childCount < 0) { immigrants = Math.max(0, eng.getPopSize() - next.length); childCount = 0; }
+  let childCount = POP - next.length - immigrants;
+  if (childCount < 0) { immigrants = Math.max(0, POP - next.length); childCount = 0; }
   const safeOn = eng.__isSafeOn();
   const treeOn = eng.__isTreeOn();
   for (let i = 0; i < childCount; i++) {
@@ -291,15 +397,15 @@ function main() {
     eng.applyGenePins(imm);
     next.push(imm);
   }
-  const newPop = eng.shuffled(next.slice(0, eng.getPopSize()));
+  const newPop = eng.shuffled(next.slice(0, POP));
   eng.setPopulation(newPop);
   eng.setGeneration(gen);
   eng.setSelected({});
-  const cells = gridCells(newPop, gridSize);
-  const newState = captureState(gen, gridSize, state.ancestor, eng.getAllowedSet());
+  const cells = gridCells(newPop);
+  const newState = captureState(gen, state.ancestor, eng.getAllowedSet());
   newState.safe = safeOn;
   newState.tree = treeOn;
-  writeGeneration(outDir, gen, gridSize, cells, newState);
+  writeGeneration(outDir, gen, cells, newState);
   const compass = eng.getCompass();
   const w = compass.w;
   const topWeights = Object.keys(w).sort((a, b) => Math.abs(w[b]) - Math.abs(w[a])).slice(0, 5)

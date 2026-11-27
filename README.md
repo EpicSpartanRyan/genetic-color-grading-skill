@@ -1,14 +1,19 @@
 # Genetic Color Grading — agent skill
 
 Evolutionary color grading as an agent skill. A genetic algorithm
-explores a 12-step grading pipeline and 73 curated 3D LUTs; the **user
-picks the winners of each generation**; the run ends with a dithered
-final image plus a baked 65³ `.cube` LUT for DaVinci Resolve.
+explores a 7-step punctual grading pipeline and 73 curated 3D LUTs; the
+**user picks the winners of each generation**; the run ends with a
+dithered final image plus a baked 65³ `.cube` LUT for DaVinci Resolve.
+Everything in the pipeline bakes into the `.cube` — the skill has no
+spatial steps. The input can be a photo or a video (4 preview frames;
+the user picks one to grade).
 
 The engine is the same code as the [Genetic Color Grading web app](https://genetic-grading.vercel.app/)
-(12-step pipeline, 18 safe-limit indicators, 19-reward compass,
-Map/Tree), extracted verbatim into Node.js — no web UI, the agent shows
-the grids and the user picks by number.
+(18 safe-limit indicators, 19-reward compass, Map/Tree), extracted
+verbatim into Node.js — no web UI, the agent shows the grids and the
+user picks by number. The web app has 5 extra spatial steps (Dehaze,
+Retinex, Clarity, Laplaciano local, Guided Detail) that cannot bake
+into a `.cube`; the skill's engine was built without them.
 
 ## Install
 
@@ -32,21 +37,32 @@ The URL is the `luts.zip` asset of [Release v0.1.0](../../releases/tag/v0.1.0) o
 repo. The script verifies the zip md5 (if you pass `--md5`), unpacks the
 350 LUT parts into `skills/genetic-color-grading/luts/` and verifies the
 joined md5 (`b1cf6e4308dcde4a852576ee935fc31f`). Requires Node.js 18+;
-stdlib only, no native dependencies.
+stdlib only, no native dependencies. Video input needs ffmpeg + ffprobe
+in PATH (see below).
 
 ## Usage
 
 ```sh
-# 1. Rank the LUTs for this photo (blind: the sheet shows numbers, not names)
+# 0. Video input (only if the input is a video): 4 preview frames at
+#    12.5/37.5/62.5/87.5% of the duration, frames.png is the 2x2 sheet.
+#    Show it, let the user pick frame 1-4; that frame is the --image.
+node skills/genetic-color-grading/scripts/extract-frames.js --video clip.mp4 --out ./run1
+
+# 0b. Ask the user how many generations (iterations) to run BEFORE
+#     ranking genes. Iterations = total generations including Gen 0
+#     (3 -> Gen 0, Gen 1, Gen 2, then bake). Stop after that many.
+
+# 1. Rank the LUTs for this photo (blind: the sheet shows numbers, not
+#    names). Only the TOP 6 survivors reach the user.
 node skills/genetic-color-grading/scripts/rank-genes.js --image photo.png --out ./run1
 
-# 2. Gen 0 from the genes the user picked (rank numbers from genes.png)
+# 2. Gen 0 from the genes the user picked (rank numbers from genes.png, 1-6)
 node skills/genetic-color-grading/scripts/evolve.js --image photo.png --out ./run1 --gen 0 \
-  --genes ./run1/genes.json --pick 1,5,9
+  --genes ./run1/genes.json --pick 1,3,5
 
-# 3. Evolve: one generation per user choice (cell numbers from gen<N>.png)
-node skills/genetic-color-grading/scripts/evolve.js --image photo.png --out ./run1 --gen 1 --picks 2,7
-node skills/genetic-color-grading/scripts/evolve.js --image photo.png --out ./run1 --gen 2 --picks 3,8 --punish 4
+# 3. Evolve: one generation per user choice (cell numbers 1-6 from gen<N>.png)
+node skills/genetic-color-grading/scripts/evolve.js --image photo.png --out ./run1 --gen 1 --picks 2,5
+node skills/genetic-color-grading/scripts/evolve.js --image photo.png --out ./run1 --gen 2 --picks 3,6 --punish 4
 
 # 4. Bake the winner: dithered image + 65^3 .cube
 node skills/genetic-color-grading/scripts/bake.js --image photo.png \
@@ -54,12 +70,12 @@ node skills/genetic-color-grading/scripts/bake.js --image photo.png \
 ```
 
 The user is the fitness function: **never auto-pick winners** — stop and
-ask after every grid. The `.cube` drops into DaVinci Resolve (Project
-Settings → Color Management → Lookup Tables, or drag onto a node). Note:
-the `.cube` carries only the punctual steps; the 5 spatial steps (Dehaze,
-Retinex, Clarity, Laplaciano local, Guided Detail) are in the exported
-image but cannot bake into a LUT, and the export warns when any is
-active.
+ask after every grid. Every generation grid is 6 variant cells (3×2, no
+original cell). The `.cube` drops into DaVinci Resolve (Project
+Settings → Color Management → Lookup Tables, or drag onto a node) and
+carries the **full recipe** — the skill pipeline is punctual-only, so
+nothing is left out of the bake. (There is no video output: grading is
+done on the chosen frame; apply the `.cube` to the video in Resolve.)
 
 Full instructions for the agent are in
 [`skills/genetic-color-grading/SKILL.md`](skills/genetic-color-grading/SKILL.md);
@@ -74,9 +90,11 @@ skills/genetic-color-grading/
   SKILL.md          # agent instructions + human-in-the-loop rules
   references/       # pipeline.md, safe-limits.md, compass.md, map-tree.md, lut-formats.md
   scripts/
-    engine.js       # the engine, extracted verbatim from the web app (generated — see dev/)
+    engine.js       # the engine, extracted verbatim from the web app (generated — see dev/),
+                    # minus the 5 spatial steps (stripped at build time)
     session.js      # shared helpers (image loading, rendering, contact sheets, .cube text)
     png.js          # minimal PNG codec (stdlib only)
+    extract-frames.js # video input: 4 preview frames + contact sheet (needs ffmpeg/ffprobe)
     rank-genes.js   # gene phase: trigger powers, filters, contact sheet
     evolve.js       # Gen 0 + one generation per run (elitism, Tree, immigrants)
     bake.js         # final dithered image + baked 65^3 .cube

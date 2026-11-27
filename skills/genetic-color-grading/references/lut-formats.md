@@ -38,6 +38,9 @@ power descending, then filtered in this order:
 3. **Min-power filter**: the threshold auto-sets to the median of ALL
    finite trigger powers; genes below it are hidden. Null-power genes
    are exempt.
+4. **Cap**: only the top 6 survivors by trigger power reach the user
+   (fewer if fewer survive — never padded). The rest are hidden with
+   reason `top-6-cap`.
 
 Previews render at the trigger power (or at 1.0 with `--previews-100`).
 

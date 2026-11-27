@@ -142,6 +142,8 @@ function main() {
 
   // 6. Min-power auto-adjust (autoAdjustGeneMinPower) over ALL finite
   //    powers, then filter (applyMinPowerFilter). Null powers survive.
+  // 7. Cap: keep only the TOP 6 survivors by trigger power. Fewer if
+  //    fewer survive — never padded.
   const finitePowers = powers.filter(p => typeof p === 'number' && isFinite(p)).sort((a, b) => b - a);
   const minPower = finitePowers.length ? finitePowers[Math.ceil(finitePowers.length / 2) - 1] : 0;
   const minPowerHidden = new Set();
@@ -152,7 +154,11 @@ function main() {
   }
 
   // Survivors, in power order. Rank numbers are 1-based, blind.
-  const survivors = aliveAfterMono.filter(idx => !familyHidden.has(idx) && !minPowerHidden.has(idx));
+  // Cap: only the TOP 6 go to the user (fewer if fewer survive).
+  const MAX_GENES = 6;
+  const allSurvivors = aliveAfterMono.filter(idx => !familyHidden.has(idx) && !minPowerHidden.has(idx));
+  const cappedOut = allSurvivors.slice(MAX_GENES);
+  const survivors = allSurvivors.slice(0, MAX_GENES);
   const ranked = survivors.map((idx, i) => ({
     rank: i + 1,
     lutIdx: idx,
@@ -164,7 +170,7 @@ function main() {
     lutIdx: idx,
     name: eng.lutName(idx),
     power: powers[idx],
-    reason: monoHidden.has(idx) ? 'monotony' : familyHidden.has(idx) ? 'family' : minPowerHidden.has(idx) ? 'min-power' : 'unknown',
+    reason: cappedOut.includes(idx) ? 'top-6-cap' : monoHidden.has(idx) ? 'monotony' : familyHidden.has(idx) ? 'family' : minPowerHidden.has(idx) ? 'min-power' : 'unknown',
     monoFails: monoHidden.has(idx) ? Object.keys(eng.monoFailsFor(idx)) : [],
   }));
 
@@ -185,6 +191,8 @@ function main() {
     previews100,
     totalGenes: n,
     survivors: ranked.length,
+    survivorsBeforeCap: allSurvivors.length,
+    cap: MAX_GENES,
     minPower,
     monoThresholds: thresholds,
     monoKills,
@@ -194,8 +202,8 @@ function main() {
   };
   saveJSON(path.join(outDir, 'genes.json'), report);
 
-  console.log('survivors: ' + ranked.length + '/' + n +
-    '  (monotony -' + monoHidden.size + ', family -' + familyHidden.size + ', min-power -' + minPowerHidden.size + ')');
+  console.log('survivors: ' + ranked.length + '/' + n + ' (before cap: ' + allSurvivors.length +
+    ', monotony -' + monoHidden.size + ', family -' + familyHidden.size + ', min-power -' + minPowerHidden.size + ', cap -' + cappedOut.length + ')');
   console.log('min-power threshold: ' + minPower.toFixed(3));
   console.log('mono kills: ' + JSON.stringify(monoKills));
   console.log('wrote ' + path.join(outDir, 'genes.json'));
